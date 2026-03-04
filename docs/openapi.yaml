@@ -1,0 +1,861 @@
+openapi: 3.0.3
+info:
+  title: TrustDrop API
+  version: 1.0.0
+  description: |
+    Zero-knowledge, one-time secret sharing API.
+
+    TrustDrop encrypts secrets client-side using AES-256-GCM before any network
+    request. The server stores only ciphertext and metadata. Encryption keys
+    exist only in the URL fragment and never touch the server.
+
+    ## Authentication
+
+    **Drop endpoints** use a per-drop access token passed as a query parameter
+    (`?t={accessToken}`). This token is returned when a drop is created and must
+    be included in all subsequent operations on that drop.
+
+    **Admin endpoints** use session-based authentication. After a successful
+    login (password + TOTP), a session cookie is set. Protected admin routes
+    check this session cookie.
+
+    ## Rate Limiting
+
+    All limits are per-IP using the `X-Forwarded-For` header. Responses include
+    `RateLimit-Policy` and `RateLimit` headers (draft-7 standard). Exceeding a
+    limit returns `429 Too Many Requests` with a `Retry-After` header.
+
+    | Endpoint Group       | Limit            |
+    |----------------------|------------------|
+    | Drop creation        | 50 / 15 min      |
+    | Drop retrieval       | 150 / 15 min     |
+    | Admin login          | 25 / 15 min      |
+    | General API          | 500 / 15 min     |
+
+    ## Security
+
+    - **Uniform 404**: Invalid tokens, expired drops, and non-existent IDs all
+      return the same 404 response to prevent existence leakage.
+    - **Referrer-Policy**: `no-referrer` prevents token leakage via HTTP headers.
+    - **X-Content-Type-Options**: `nosniff` prevents MIME sniffing attacks.
+  license:
+    name: AGPL-3.0
+    url: https://www.gnu.org/licenses/agpl-3.0.html
+  contact:
+    name: TrustDrop
+    url: https://trustdrop.com
+
+servers:
+  - url: https://trustdrop.com
+    description: Production
+
+tags:
+  - name: Drops
+    description: Create and consume encrypted drops
+  - name: Stats
+    description: Public aggregate statistics
+  - name: Admin Auth
+    description: Admin authentication (password + TOTP)
+  - name: Admin Blog
+    description: Blog post management (session-protected)
+  - name: Public Blog
+    description: Public blog listing and detail
+
+paths:
+  /api/drops:
+    post:
+      tags: [Drops]
+      summary: Create an encrypted drop
+      description: |
+        Receives ciphertext (already encrypted client-side) and metadata.
+        The encryption key exists only in the URL fragment returned to the
+        creator — it never touches the server.
+
+        Supports CORS for the embeddable widget.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDropRequest"
+      responses:
+        "200":
+          description: Drop created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, accessToken]
+                properties:
+                  id:
+                    type: string
+                    description: 128-bit base64url drop ID (22 characters)
+                    example: "dQw4w9WgXcQ-abc123xyz"
+                  accessToken:
+                    type: string
+                    description: 128-bit access token required for all subsequent operations
+                    example: "k7Hj9mNpQrStUvWxYz01"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          description: Rate limit exceeded (50 requests / 15 min)
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds until the rate limit resets
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/drops/{id}/meta:
+    get:
+      tags: [Drops]
+      summary: Get drop metadata
+      description: |
+        Lightweight metadata check. Returns content type, password requirement,
+        and view counts without the ciphertext. Used to render the correct UI
+        before attempting decryption.
+      parameters:
+        - $ref: "#/components/parameters/DropId"
+        - $ref: "#/components/parameters/AccessToken"
+      responses:
+        "200":
+          description: Drop metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [meta, maxViews, viewCount]
+                properties:
+                  meta:
+                    $ref: "#/components/schemas/DropMeta"
+                  maxViews:
+                    type: integer
+                    description: Maximum allowed views before destruction
+                    example: 3
+                  viewCount:
+                    type: integer
+                    description: Number of successful decryptions so far
+                    example: 1
+        "404":
+          description: Drop not found, expired, consumed, or invalid token (uniform response)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    enum: [consumed_or_expired]
+        "429":
+          description: Rate limit exceeded (150 requests / 15 min)
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/drops/{id}/consume:
+    post:
+      tags: [Drops]
+      summary: "Consume flow step 1: fetch ciphertext"
+      description: |
+        Fetches the encrypted ciphertext WITHOUT incrementing the view count.
+        The client decrypts locally, then calls `/confirm` on success or
+        `/burn` on failure (if burn_on_fail is enabled).
+
+        This two-step flow ensures network failures or wrong passwords
+        don't waste views.
+      parameters:
+        - $ref: "#/components/parameters/DropId"
+        - $ref: "#/components/parameters/AccessToken"
+      responses:
+        "200":
+          description: Ciphertext and metadata returned
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ciphertext_b64, meta, maxViews, viewCount]
+                properties:
+                  ciphertext_b64:
+                    type: string
+                    description: Base64-encoded AES-256-GCM ciphertext
+                  meta:
+                    $ref: "#/components/schemas/DropMeta"
+                  maxViews:
+                    type: integer
+                    example: 3
+                  viewCount:
+                    type: integer
+                    example: 1
+        "404":
+          description: Drop not found, expired, consumed, or invalid token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    enum: [consumed_or_expired]
+        "429":
+          description: Rate limit exceeded (150 requests / 15 min)
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/drops/{id}/confirm:
+    post:
+      tags: [Drops]
+      summary: "Consume flow step 2: confirm successful decryption"
+      description: |
+        Called after the client successfully decrypts the ciphertext.
+        Increments the view count. If the view limit is reached, the drop
+        is permanently destroyed by the storage layer.
+      parameters:
+        - $ref: "#/components/parameters/DropId"
+        - $ref: "#/components/parameters/AccessToken"
+      responses:
+        "200":
+          description: View confirmed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [remainingViews]
+                properties:
+                  remainingViews:
+                    type: integer
+                    description: Views remaining before destruction (0 = destroyed)
+                    example: 2
+        "429":
+          description: Rate limit exceeded (150 requests / 15 min)
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/drops/{id}/burn:
+    post:
+      tags: [Drops]
+      summary: Emergency destroy (wrong password)
+      description: |
+        Called when decryption fails and `burn_on_fail` is enabled on the drop.
+        Permanently destroys the drop on the first wrong password attempt.
+        No recovery is possible. This is the anti-brute-force kill switch.
+      parameters:
+        - $ref: "#/components/parameters/DropId"
+        - $ref: "#/components/parameters/AccessToken"
+      responses:
+        "200":
+          description: Burn result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [burned]
+                properties:
+                  burned:
+                    type: boolean
+                    description: Whether the drop was destroyed
+                    example: true
+        "429":
+          description: Rate limit exceeded (150 requests / 15 min)
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/stats:
+    get:
+      tags: [Stats]
+      summary: Get aggregate statistics
+      description: Returns the total number of drops created (cumulative, includes consumed/expired).
+      responses:
+        "200":
+          description: Statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [totalDrops]
+                properties:
+                  totalDrops:
+                    type: integer
+                    description: Total drops created since launch
+                    example: 12847
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/status:
+    get:
+      tags: [Admin Auth]
+      summary: Check admin setup status
+      description: Returns whether the admin account has been configured (password + TOTP).
+      responses:
+        "200":
+          description: Setup status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [isSetup]
+                properties:
+                  isSetup:
+                    type: boolean
+                    description: Whether admin password and TOTP are configured
+                    example: true
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/setup:
+    post:
+      tags: [Admin Auth]
+      summary: Initial admin setup
+      description: |
+        Creates the admin password hash and TOTP secret. Only works if admin is
+        not yet configured. Requires the `ADMIN_SETUP_TOKEN` environment variable
+        to match the `setupToken` in the request body, preventing unauthorized
+        admin creation on fresh deployments.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, setupToken]
+              properties:
+                password:
+                  type: string
+                  minLength: 12
+                  description: Admin password (minimum 12 characters)
+                setupToken:
+                  type: string
+                  description: Must match the ADMIN_SETUP_TOKEN environment variable
+      responses:
+        "200":
+          description: Admin configured, returns TOTP QR code
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [qrCodeDataUrl, totpSecret]
+                properties:
+                  qrCodeDataUrl:
+                    type: string
+                    description: Data URL of the TOTP QR code for authenticator app scanning
+                  totpSecret:
+                    type: string
+                    description: TOTP secret key (backup, in case QR scanning fails)
+        "400":
+          description: Admin already configured or invalid password
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "403":
+          description: Invalid or missing setup token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/login:
+    post:
+      tags: [Admin Auth]
+      summary: Admin login
+      description: |
+        Authenticates with password and TOTP code. On success, creates a session
+        with a 24-hour httpOnly cookie. Rate limited to 25 attempts per 15 minutes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password, totpCode]
+              properties:
+                password:
+                  type: string
+                  description: Admin password
+                totpCode:
+                  type: string
+                  description: 6-digit TOTP code from authenticator app
+                  pattern: "^[0-9]{6}$"
+      responses:
+        "200":
+          description: Login successful, session cookie set
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+        "400":
+          description: Admin not configured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "401":
+          description: Invalid credentials or TOTP code
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "429":
+          description: Rate limit exceeded (25 attempts / 15 min)
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/session:
+    get:
+      tags: [Admin Auth]
+      summary: Check admin session
+      description: Returns whether the current request has an authenticated admin session.
+      responses:
+        "200":
+          description: Session status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [isAdmin]
+                properties:
+                  isAdmin:
+                    type: boolean
+                    example: true
+
+  /api/admin/logout:
+    post:
+      tags: [Admin Auth]
+      summary: Admin logout
+      description: Destroys the admin session cookie.
+      responses:
+        "200":
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+
+  /api/admin/blog:
+    get:
+      tags: [Admin Blog]
+      summary: List all blog posts (including drafts)
+      description: Returns all blog posts ordered by creation date. Requires admin session.
+      security:
+        - sessionCookie: []
+      responses:
+        "200":
+          description: List of blog posts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BlogPost"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      tags: [Admin Blog]
+      summary: Create a blog post
+      description: Creates a new blog post. Slug must be unique.
+      security:
+        - sessionCookie: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBlogPostRequest"
+      responses:
+        "201":
+          description: Post created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlogPost"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "409":
+          description: Slug already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Message"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/admin/blog/{id}:
+    get:
+      tags: [Admin Blog]
+      summary: Get a blog post by ID
+      description: Returns a single blog post by its database ID.
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Blog post
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlogPost"
+        "401":
+          description: Not authenticated
+        "404":
+          description: Post not found
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    patch:
+      tags: [Admin Blog]
+      summary: Update a blog post
+      description: Partially updates a blog post. Only provided fields are changed.
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateBlogPostRequest"
+      responses:
+        "200":
+          description: Post updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlogPost"
+        "401":
+          description: Not authenticated
+        "404":
+          description: Post not found
+        "409":
+          description: Slug already exists
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      tags: [Admin Blog]
+      summary: Delete a blog post
+      security:
+        - sessionCookie: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Post deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+        "401":
+          description: Not authenticated
+        "404":
+          description: Post not found
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/blog:
+    get:
+      tags: [Public Blog]
+      summary: List published blog posts
+      description: Returns all published blog posts, ordered by publish date.
+      responses:
+        "200":
+          description: List of published posts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BlogPost"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/blog/{slug}:
+    get:
+      tags: [Public Blog]
+      summary: Get a published blog post by slug
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+          description: URL-friendly slug (lowercase, hyphen-separated)
+          example: zero-knowledge-encryption-explained
+      responses:
+        "200":
+          description: Blog post
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlogPost"
+        "404":
+          description: Post not found or not published
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /blog/feed.xml:
+    get:
+      tags: [Public Blog]
+      summary: RSS feed
+      description: RSS 2.0 feed of all published blog posts.
+      responses:
+        "200":
+          description: RSS XML feed
+          content:
+            application/rss+xml:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: connect.sid
+      description: Express session cookie set after successful admin login
+
+  parameters:
+    DropId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: 128-bit base64url drop ID (22 characters)
+      example: "dQw4w9WgXcQ-abc123xyz"
+
+    AccessToken:
+      name: t
+      in: query
+      required: true
+      schema:
+        type: string
+      description: 128-bit access token returned when the drop was created
+      example: "k7Hj9mNpQrStUvWxYz01"
+
+  schemas:
+    DropMeta:
+      type: object
+      required: [iv, hasPassword, type]
+      properties:
+        iv:
+          type: string
+          description: Base64-encoded initialization vector for AES-GCM decryption
+        salt:
+          type: string
+          description: Base64-encoded PBKDF2 salt (present only if password-protected)
+        hasPassword:
+          type: boolean
+          description: Whether the drop requires a password for decryption
+        type:
+          type: string
+          enum: [text, file]
+          description: Content type of the encrypted payload
+        mime:
+          type: string
+          description: MIME type (file drops only)
+          example: application/pdf
+        filename:
+          type: string
+          description: Original filename (file drops only)
+          example: credentials.pdf
+        size:
+          type: integer
+          description: Original file size in bytes (file drops only)
+          example: 204800
+
+    CreateDropRequest:
+      type: object
+      required: [ciphertext_b64, meta, expires_in_seconds]
+      properties:
+        ciphertext_b64:
+          type: string
+          minLength: 1
+          description: Base64-encoded AES-256-GCM ciphertext (encrypted client-side)
+        meta:
+          $ref: "#/components/schemas/DropMeta"
+        expires_in_seconds:
+          type: integer
+          minimum: 1
+          maximum: 2592000
+          description: Time until the drop expires (max 30 days = 2,592,000 seconds)
+          example: 86400
+        max_views:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 1
+          description: Number of successful decryptions before destruction
+          example: 3
+        burn_on_fail:
+          type: boolean
+          default: true
+          description: Destroy the drop immediately on a failed decryption attempt
+
+    BlogPost:
+      type: object
+      required: [id, slug, title, excerpt, body, published, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        slug:
+          type: string
+          example: zero-knowledge-encryption-explained
+        title:
+          type: string
+          example: "Zero-Knowledge Encryption Explained"
+        excerpt:
+          type: string
+          description: Short summary for listings and OG descriptions
+        body:
+          type: string
+          description: Full post content in Markdown
+        ogImageUrl:
+          type: string
+          description: URL for the post's Open Graph image
+        published:
+          type: integer
+          enum: [0, 1]
+          description: "0 = draft, 1 = published"
+        tags:
+          type: array
+          items:
+            type: string
+          example: [encryption, privacy, security]
+        publishedAt:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateBlogPostRequest:
+      type: object
+      required: [title, slug, excerpt, body]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 512
+        slug:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          description: URL-friendly identifier (lowercase, hyphens only)
+        excerpt:
+          type: string
+          minLength: 1
+        body:
+          type: string
+          minLength: 1
+          description: Markdown content
+        ogImageUrl:
+          type: string
+        published:
+          type: boolean
+          default: false
+        tags:
+          type: array
+          items:
+            type: string
+
+    UpdateBlogPostRequest:
+      description: All fields are optional. Only provided fields are updated.
+      type: object
+      properties:
+        title:
+          type: string
+        slug:
+          type: string
+        excerpt:
+          type: string
+        body:
+          type: string
+        ogImageUrl:
+          type: string
+        published:
+          type: boolean
+        tags:
+          type: array
+          items:
+            type: string
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+          example: "Validation error: ciphertext_b64 is required"
+
+    Message:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "Unauthorized"
+
+  responses:
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+                example: "Internal server error"
