@@ -12,7 +12,8 @@
 <p align="center">
   <a href="https://www.trustdrop.com">Live App</a> &middot;
   <a href="https://www.trustdrop.com/blog">Blog</a> &middot;
-  <a href="https://www.trustdrop.com/how-it-works">How It Works</a>
+  <a href="https://www.trustdrop.com/how-it-works">How It Works</a> &middot;
+  <a href="https://github.com/trust-drop/TrustDrop"><img src="https://img.shields.io/github/stars/trust-drop/TrustDrop?style=social" alt="GitHub stars" /></a>
 </p>
 
 ---

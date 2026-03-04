@@ -304,6 +304,15 @@ export default function TrustCenter() {
                 >
                   About TrustDrop →
                 </Link>
+                <a
+                  href="https://github.com/trust-drop/TrustDrop"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-sm text-primary hover:underline font-medium"
+                  data-testid="link-github-trust-center"
+                >
+                  Star us on GitHub →
+                </a>
               </div>
             </div>
           </section>

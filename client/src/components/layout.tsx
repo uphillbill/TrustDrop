@@ -1,4 +1,5 @@
 import { Link, useLocation } from "wouter";
+import { SiGithub } from "react-icons/si";
 const dropLogo = "/drop-logo.png";
 const rectLogo = "/trust-logo-rect.png";
 
@@ -154,8 +155,19 @@ export function Layout({ children }: { children: React.ReactNode }) {
               Terms & Conditions
             </Link>
           </div>
-          <p className="text-xs text-muted-foreground/60">
+          <p className="text-xs text-muted-foreground/60 flex items-center gap-1.5">
             TrustDrop &mdash; Zero-knowledge, one-time secret sharing.
+            <span className="mx-1">&middot;</span>
+            <a
+              href="https://github.com/trust-drop/TrustDrop"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-muted-foreground/60 hover:text-foreground transition-colors"
+              data-testid="link-github-footer"
+            >
+              <SiGithub className="w-3 h-3" />
+              Open source on GitHub
+            </a>
           </p>
         </div>
       </footer>
