@@ -15,3 +15,9 @@ attached_assets/
 .env.*
 *.pem
 *.key
+
+# Claude Code / assistant working files (local only, not shipped)
+CLAUDE.md
+CLAUDE.local.md
+progress.md
+.claude/
