@@ -139,7 +139,7 @@ paths:
                     example: 3
                   viewCount:
                     type: integer
-                    description: Number of successful decryptions so far
+                    description: Number of ciphertext deliveries charged
                     example: 1
         "404":
           description: Drop not found, expired, consumed, or invalid token (uniform response)
@@ -159,14 +159,11 @@ paths:
   /api/drops/{id}/consume:
     post:
       tags: [Drops]
-      summary: "Consume flow step 1: fetch ciphertext"
+      summary: Charge a view and return ciphertext
       description: |
-        Fetches the encrypted ciphertext WITHOUT incrementing the view count.
-        The client decrypts locally, then calls `/confirm` on success or
-        `/burn` on failure (if burn_on_fail is enabled).
-
-        This two-step flow ensures network failures or wrong passwords
-        don't waste views.
+        The server charges a view before sending ciphertext and deletes the
+        stored drop when it charges the final view. Interrupted deliveries
+        may use a view. The browser decrypts locally.
       parameters:
         - $ref: "#/components/parameters/DropId"
         - $ref: "#/components/parameters/AccessToken"
@@ -208,17 +205,14 @@ paths:
   /api/drops/{id}/confirm:
     post:
       tags: [Drops]
-      summary: "Consume flow step 2: confirm successful decryption"
-      description: |
-        Called after the client successfully decrypts the ciphertext.
-        Increments the view count. If the view limit is reached, the drop
-        is permanently destroyed by the storage layer.
+      summary: Read remaining views for legacy clients
+      description: Returns remaining views without changing the count.
       parameters:
         - $ref: "#/components/parameters/DropId"
         - $ref: "#/components/parameters/AccessToken"
       responses:
         "200":
-          description: View confirmed
+          description: Remaining views returned
           content:
             application/json:
               schema:
@@ -237,11 +231,10 @@ paths:
   /api/drops/{id}/burn:
     post:
       tags: [Drops]
-      summary: Emergency destroy (wrong password)
+      summary: Request deletion after a browser-reported decryption failure
       description: |
-        Called when decryption fails and `burn_on_fail` is enabled on the drop.
-        Permanently destroys the drop on the first wrong password attempt.
-        No recovery is possible. This is the anti-brute-force kill switch.
+        Deletes any remaining views if burn-on-failure is enabled. The server
+        can act only on failures the browser reports.
       parameters:
         - $ref: "#/components/parameters/DropId"
         - $ref: "#/components/parameters/AccessToken"
@@ -732,7 +725,7 @@ components:
           minimum: 1
           maximum: 100
           default: 1
-          description: Number of successful decryptions before destruction
+          description: Number of ciphertext deliveries allowed before destruction
           example: 3
         burn_on_fail:
           type: boolean
